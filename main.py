@@ -38,7 +38,7 @@ from languages import update_hp_for_corpus
 
 UD_BASE_PATH = ''
 EMBD_BASE_PATH = ''
-OUT_FREQ = 10
+OUT_FREQ = 100
 
 HP = {
     'batchSize': 80,
@@ -64,11 +64,11 @@ HP = {
 
 HP_small = {
     'batchSize': 80,
-    'embdDim': 300,
+    'embdDim': 100,
     'charEmbdDim': 16,
     'charLstmUnits': 16,
-    'lstmUnits': 100,
-    'lstmLayers': 3,
+    'lstmUnits': 128,
+    'lstmLayers': 2,
     'wordEmbdL2': 0.1,
     'charEmbdL2': 0.1,
     'learningRate': {
@@ -79,9 +79,9 @@ HP_small = {
         'seqtag': 0.001
     },
     'clipping': None,
-    'dpSpecificLstm': {
-        'layers': [ 100, 100 ]
-    }
+    #'dpSpecificLstm': {
+    #    'layers': [ 100, 100 ]
+    #}
 }
 
 
@@ -120,7 +120,7 @@ def main():
 
     embd_words, embd_vectors = loadEmbeddings(args.embeddings)
 
-    HP['embd'] = { 'words': embd_words, 'vectors': embd_vectors, 'allow_unk': False }
+    HP['embd'] = { 'words': embd_words, 'vectors': embd_vectors, 'allow_unk': True }
 
     forms = []
 
@@ -195,7 +195,7 @@ def main():
     for treebank_name in treebanks:
         tb = treebanks[treebank_name]
 
-        if True:
+        if False: #True:
             HP['tasks']['%s/%s' % (treebank_name, 'upos')] = {
                 'type': 'seqtag',
                 'treebank': tb,
@@ -234,17 +234,17 @@ def main():
             'treebank': tb,
             'i2t': tb['rel_i2t'],
             't2i': tb['rel_t2i'],
-            'dep_hidden_size': 256,
-            'head_hidden_size': 256,
-            'dep_output_size': 256,
-            'head_output_size': 256
+            'dep_hidden_size': 128,
+            'head_hidden_size': 128,
+            'dep_output_size': 128,
+            'head_output_size': 128,
         }
 
     # collect existing features
     conll_feats = collect_possible_feats(treebanks[first_treebank_name]['raw'], ['train', 'dev'])
 
     # Add features to HP['tasks']
-    add_features_to_hp(HP, conll_feats, treebanks, first_treebank_name)
+    #add_features_to_hp(HP, conll_feats, treebanks, first_treebank_name)
 
     tf.reset_default_graph()
 
@@ -274,6 +274,7 @@ def main():
             curr['best'][task_name + '/arcs'] = { 'devacc': 0.0 }
             curr['best'][task_name + '/tags'] = { 'devacc': 0.0 }
 
+    batch_cache = {}
     stop = False
     while True:
         sys.stdout.write('EPOCH %6d ...\t\t\t\r' % (epoch))
@@ -286,20 +287,20 @@ def main():
         list_of_tasks = list(model['tasks'].keys())
         random.shuffle(list_of_tasks)
 
-        before_iteration = time.time()
+        before_iteration = time.time() * 1000
 
         for task_name in list_of_tasks:
             m = model['tasks'][task_name]
 
             skip_this_task = False
             if m['type'] == 'seqtag' and len(curr['history']) > 0 and task_name in curr['history'][-1] and curr['history'][-1][task_name]['acc'] > 0.99:
-                sys.stderr.write('Skip training of %s\n' % (task_name))
+                sys.stderr.write('Skip training of %s\t\t\r' % (task_name))
                 t = {'name': task_name, 'type': m['type'], 'acc': 0, 'loss': 0}
                 skip_this_task = True
 
             if m['type'] == 'seqtag' and not skip_this_task:
                 t = { 'name': task_name, 'type': m['type'] }
-                batch = generate_batch(m['treebank']['raw']['train'], task_name, HP['batchSize'], HP)
+                batch = generate_batch(m['treebank']['raw']['train'], task_name, HP['batchSize'], HP, 0, True, batch_cache)
 
                 mo = m['output']
                 o, t['loss'], t['acc'] = sess.run([mo['opt'],
@@ -321,7 +322,10 @@ def main():
             elif m['type'] == 'depparse':
                 t = { 'name': task_name, 'type': m['type'], 'arcs': {}, 'tags': {} }
 
-                batch = generate_batch(m['treebank']['raw']['train'], task_name, HP['batchSize'], HP)
+                before_generate_batch = time.time() * 1000
+                batch = generate_batch(m['treebank']['raw']['train'], task_name, HP['batchSize'], HP, 0, True, batch_cache)
+                batch_generation_time = time.time() * 1000 - before_generate_batch
+                #sys.stderr.write('batch_generation_time = %d ms\t\t\r' % (batch_generation_time))
 
                 gold = { 'arcs': m['arcs']['gold'], 'tags': m['tags']['gold'] }
                 out_arcs, out_tags = m['arcs']['output'], m['tags']['output']
@@ -361,8 +365,8 @@ def main():
 
             tasks[task_name] = t
 
-        after_iteration = time.time()
-        sys.stderr.write('\t\tTraining (%d) took %d seconds\r' % (epoch, after_iteration - before_iteration))
+        after_iteration = time.time() * 1000
+        sys.stderr.write('\t\tTraining (%d) took %d / %d ms\r' % (epoch, batch_generation_time, after_iteration - before_iteration))
 
         if stop:
             break

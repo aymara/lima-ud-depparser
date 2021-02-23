@@ -383,32 +383,41 @@ def get_char_seq(sent, tidx, c2i, unk):
     return chars
 
 
-def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
+def generate_batch(tb, task, size, hp, start=0, flagRandom=True, batch_cache={}):
     if flagRandom:
         sent_indices = random.sample(range(len(tb)), size)
     else:
         sent_indices = range(len(tb))[start:start+size]
 
-    word2idxp = hp['embd']['words'] #hp['input']['trainableDict']['w2i']
+    word2idxp = hp['embd']['words']
     word2idxt = hp['input']['trainableDict']['w2i']
     known_forms = hp['embd']['forms']
     char2idx = hp['input']['trainableDict']['c2i']
 
-    b = { 'input_trainable': [], 'input_pretrained': [], 'chars': [], 'word_len': [], 'gold': [], 'len': [] }
+    b = {}
 
+    task_name = ''
     if len(task) > 0:
         cls2idx  = hp['tasks'][task]['t2i']
         task_name = task.split('/')[1].split('-')[0]
 
+    if task_name in batch_cache:
+        b = batch_cache[task_name]
+    else:
+        batch_cache[task_name] = {}
+        b = batch_cache[task_name]
+        b['input_trainable'] = np.zeros((size, hp['input']['maxSeqLen']), dtype=np.int32)
+        b['input_pretrained'] = np.zeros((size, hp['input']['maxSeqLen'], hp['embdDim']), dtype=np.float32)
+        b['chars'] = np.zeros((size, hp['input']['maxSeqLen'], hp['input']['maxWordLen']), dtype=np.int32)
+        b['word_len'] = np.zeros((size, hp['input']['maxSeqLen']), dtype=np.int32)
+        b['len'] = np.zeros((size), dtype=np.int32)
+        b['gold'] = np.zeros((size, hp['input']['maxSeqLen']), dtype=np.int32)
         if task.endswith('depparse'):
-            b['gold_tags'] = []
+            b['gold_tags'] = np.zeros((size, hp['input']['maxSeqLen']), dtype=np.int32)
 
-    for idx in sent_indices:
-        wt = [ 0 for i in range(hp['input']['maxSeqLen']) ] # for trainable
-        wp = [ [ 0 for _ in range(hp['embdDim']) ] for i in range(hp['input']['maxSeqLen']) ] # for pretrained
-        wl = [ 0 for i in range(hp['input']['maxSeqLen']) ]
+    for i in range(len(sent_indices)):
+        idx = sent_indices[i]
         n = 1
-        c = [ [ 0 for i in range(hp['input']['maxWordLen']) ] for i in range(hp['input']['maxSeqLen']) ]
 
         for t in tb[idx]:
             if isinstance(t['id'], tuple):
@@ -419,41 +428,41 @@ def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
             # Training behavior
             if flagRandom:
                 # Pretrained embeddings
-                if t['form'] in word2idxp and ((not hp['embd']['allow_unk']) or (random.randint(0, 99) < 90)):
+                if t['form'] in word2idxp:
                     id = word2idxp[t['form']]
-                    wp[n] = hp['embd']['vectors'][id]
+                    b['input_pretrained'][i,n,:] = hp['embd']['vectors'][id]
                 else:
                     if hp['embd']['allow_unk']:
-                        if form in word2idxp and (random.randint(0, 99) < 90):
+                        if form in word2idxp:
                             id = word2idxp[form]
-                            wp[n] = hp['embd']['vectors'][id]
+                            b['input_pretrained'][i, n, :] = hp['embd']['vectors'][id]
                         else:
                             id = word2idxp[UNK]
-                            wp[n] = hp['embd']['vectors'][id]
+                            b['input_pretrained'][i, n, :] = hp['embd']['vectors'][id]
                     else:
                         sys.stderr.write('ERROR: unknown words are not allowed: \"%s\"\n' % t['form'])
                         raise
 
                 # Trainable embeddings
-                if form in known_forms and (random.randint(0, 99) < 80):
-                    wt[n] = word2idxt[form]
+                if form in known_forms and (random.randint(0, 99) < 90):
+                    b['input_trainable'][i, n] = word2idxt[form]
                 else:
                     #sys.stderr.write('Form \'%s\' is considered UNK: %d %d\n' % (t['form'], int(form in known_forms), int(form in word2idxp)))
-                    wt[n] = word2idxt[UNK]
+                    b['input_trainable'][i, n] = word2idxt[UNK]
 
             else:
                 # Pretrained embeddings
                 if t['form'] in word2idxp:
                     id = word2idxp[t['form']]
-                    wp[n] = hp['embd']['vectors'][id]
+                    b['input_pretrained'][i, n, :] = hp['embd']['vectors'][id]
                 else:
                     if hp['embd']['allow_unk']:
                         if form in word2idxp:
                             id = word2idxp[form]
-                            wp[n] = hp['embd']['vectors'][id]
+                            b['input_pretrained'][i, n, :] = hp['embd']['vectors'][id]
                         else:
                             id = word2idxp[UNK]
-                            wp[n] = hp['embd']['vectors'][id]
+                            b['input_pretrained'][i, n, :] = hp['embd']['vectors'][id]
                     else:
                         sys.stderr.write('ERROR: Form \'%s\' is considered UNK\n' % (t['form']))
                         sys.stderr.write('Sentence: %s\n' % ' '.join([ x['form'] for x in tb[idx] ]))
@@ -461,66 +470,55 @@ def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
 
                 # Trainable embeddings
                 if form in known_forms:
-                    wt[n] = word2idxt[form]
+                    b['input_trainable'][i, n] = word2idxt[form]
                 else:
-                    wt[n] = word2idxt[UNK]
+                    b['input_trainable'][i, n] = word2idxt[UNK]
 
             char_list = get_char_seq(tb[idx], n, char2idx, UNK)
             this_word_len = len(char_list)
-            for i in range(min(this_word_len, hp['input']['maxWordLen'])):
-                c[n][i] = char_list[i]
-            wl[n] = min(this_word_len, hp['input']['maxWordLen'])
+            for j in range(min(this_word_len, hp['input']['maxWordLen'])):
+                b['chars'][i,n,j] = char_list[j]
+            b['word_len'][i,n] = min(this_word_len, hp['input']['maxWordLen'])
             #print("%s %s" % (t['form'], c[n]))
             n += 1
 
         if n >= hp['input']['maxSeqLen']:
             raise
-        b['input_trainable'].append(wt)
-        b['input_pretrained'].append(wp)
-        b['len'].append(n)
-        b['chars'].append(c)
-        b['word_len'].append(wl)
+
+        b['len'][i] = n
 
         if len(task) == 0:
             continue
 
         if task_name.endswith('upos'):
-            g = [0 for i in range(hp['input']['maxSeqLen'])]
             n = 1
             for t in tb[idx]:
                 if isinstance(t['id'], tuple):
                     continue
 
                 ci = cls2idx[t['upostag']]
-                g[n] = ci
+                b['gold'][i,n] = ci
                 n += 1
 
-            if n != b['len'][-1]:
+            if n != b['len'][i]:
                 raise
 
-            b['gold'].append(g)
-
         elif task_name.endswith('xpos'):
-            g = [0 for i in range(hp['input']['maxSeqLen'])]
             n = 1
             for t in tb[idx]:
                 if isinstance(t['id'], tuple):
                     continue
 
                 ci = cls2idx[t['xpostag']]
-                g[n] = ci
+                b['gold'][i,n] = ci
                 n += 1
 
-            if n != b['len'][-1]:
+            if n != b['len'][i]:
                 raise
-
-            b['gold'].append(g)
 
         elif task_name.endswith('depparse'):
             # dep x head: 0 - no rel, 1 - rel exists
             # each line can have only one 1.
-            g  = np.zeros([ hp['input']['maxSeqLen'] ]) #, hp['input']['maxSeqLen'] ])
-            gt = np.zeros([ hp['input']['maxSeqLen'] ])
             n = 1
             for t in tb[idx]:
                 if isinstance(t['id'], tuple):
@@ -535,20 +533,17 @@ def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
 
                 if head_idx > hp['input']['maxSeqLen']:
                     raise
-                g[n] = head_idx
+
+                b['gold'][i,n] = head_idx
                 # TODO: try to transpose g. What is the difference?
                 ci = cls2idx[preprocess_deprel(t['deprel'])]
-                gt[n] = ci
+                b['gold_tags'][i,n] = ci
                 n += 1
 
-            if n != b['len'][-1]:
+            if n != b['len'][i]:
                 raise
 
-            b['gold'].append(g)
-            b['gold_tags'].append(gt)
-
         elif task_name.endswith('root'):
-            g  = np.zeros([ hp['input']['maxSeqLen'] ])
             n = 1
             for t in tb[idx]:
                 if isinstance(t['id'], tuple):
@@ -561,20 +556,18 @@ def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
                     head_idx = int(head_idx)
 
                 if head_idx == 0:
-                    g[n] = 1
+                    b['gold'][i,n] = 1
+                else:
+                    b['gold'][i,n] = 0
 
                 n += 1
 
-            if n != b['len'][-1]:
+            if n != b['len'][i]:
                 raise
-
-            b['gold'].append(g)
-
         else:
             corpus_name, _, field_name = task.split('/')
             field_name = convert_feature_name_back(field_name)
 
-            g = [0 for i in range(hp['input']['maxSeqLen'])]
             n = 1
             for t in tb[idx]:
                 if isinstance(t['id'], tuple):
@@ -584,31 +577,14 @@ def generate_batch(tb, task, size, hp, start=0, flagRandom=True):
                     ci = cls2idx[FEATNONE]
                 else:
                     ci = cls2idx[t['feats'][field_name]]
-                g[n] = ci
+
+                b['gold'][i,n] = ci
                 n += 1
 
-            if n != b['len'][-1]:
+            if n != b['len'][i]:
                 raise
 
-            b['gold'].append(g)
-
-    rv = {
-        'input_trainable': np.array(b['input_trainable'], dtype=np.int32),
-        'input_pretrained': np.array(b['input_pretrained'], dtype=np.float32),
-        'chars': np.array(b['chars'], dtype=np.int32),
-        'word_len': np.array(b['word_len'], dtype=np.int32),
-        'len': np.array(b['len'], dtype=np.int32)
-    }
-
-    if len(task) == 0:
-        return rv
-
-    rv['gold'] = np.array(b['gold'], dtype=np.int32)
-
-    if task.endswith('depparse'):
-        rv['gold_tags'] = np.array(b['gold_tags'], dtype=np.int32)
-
-    return rv
+    return b
 
 
 def evaluate_on_set(tb, task, hp, session, model):
@@ -834,6 +810,8 @@ def evaluate_seqtag(tb, hp, task, pred, gold):
     precision, recall, f1 = None, None, None
 
     for isent, sent in enumerate(pred):
+        if isent >= len(tb):
+            break
         for itok in range(1, len(tb[isent])):
             total += 1
             if pred[isent][itok] != gold[isent][itok]:
@@ -850,7 +828,7 @@ def evaluate_seqtag(tb, hp, task, pred, gold):
 
         if target is not None:
             for isent, sent in enumerate(pred):
-                for itok in range(1, len(tb[isent])):
+                for itok in range(1, len(tb[isent])+1):
                     if gold[isent][itok] == pred[isent][itok]:
                         if pred[isent][itok] == t2i[target]:
                             tp += 1
@@ -875,7 +853,9 @@ def evaluate_depparse(tb, hp, task, pred, gold):
     errors_rel = 0.0
 
     for isent, sent in enumerate(pred['arcs']):
-        for itok in range(1, len(tb[isent])):
+        if isent >= len(tb):
+            break
+        for itok in range(1, len(tb[isent]) + 1):
             total += 1
             if pred['arcs'][isent][itok] != gold['arcs'][isent][itok]:
                 errors_arc += 1
@@ -909,7 +889,7 @@ def evaluate_all_tasks(treebanks, part, model, tasks, hp, sess, cache):
                 cache[task_name] = { 'full': None, 'input_only': None }
 
             if cache[task_name]['full'] is None:
-                cache[task_name]['full'] = generate_batch(tb, task_name, len(tb), hp, 0, False)
+                cache[task_name]['full'] = generate_batch(tb, task_name, len(tb), hp, 0, False, {})
 
             batch = cache[task_name]['full']
 
@@ -948,7 +928,7 @@ def evaluate_all_tasks(treebanks, part, model, tasks, hp, sess, cache):
                 if len(tb) - sentences_used < batch_size:
                     batch_size = len(tb) - sentences_used
 
-                batch = generate_batch(tb, '', batch_size, hp, sentences_used, False)
+                batch = generate_batch(tb, '', batch_size, hp, sentences_used, False, {})
 
                 cache[treebank_name]['input_only'].append(batch)
 

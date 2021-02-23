@@ -12,7 +12,7 @@ UD_CORP=$UD_LANG
 
 mkdir -p $SAVE_TO
 
-cat $UD_PATH/UD_$UD_LANG/*.conllu | gawk -F $'\t' '{ print $2 }' | perl -CSDA -plE 's/\s+//g' | LC_COLLATE=POSIX sort | LC_COLLATE=POSIX uniq > $SAVE_TO/all_words.txt
+cat $UD_PATH/UD_$UD_LANG/*.conllu | gawk -F $'\t' '{ print $2 }' | perl -CSDA -plE 's/\s+//g' | perl to_lower.pl | LC_COLLATE=POSIX sort | LC_COLLATE=POSIX uniq > $SAVE_TO/all_words.txt
 
 echo Found `wc -l $SAVE_TO/all_words.txt` different words ...
 
